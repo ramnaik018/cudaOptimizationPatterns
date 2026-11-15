@@ -57,6 +57,35 @@ int main(){
     dCopyKernel<<<grid,block>>>(d_in, d_out, N);
     cudaDeviceSynchronize();
 
+    cudaEvent_t start;
+    cudaEvent_t stop; // cudaEvent_t is like a holder to the actual marker sent into default stream
+
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop); // create the actual event objects in GPU , just like cudaMalloc
+
+    int iterations = 100;
+    cudaEventRecord(start);
+    for(int i=0;i<iterations;i++){
+        dCopyKernel<<<grid,block>>> (d_in, d_out, N);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop); //CPU wait until stop event is returned
+
+    float msElapsed = 0.0f;
+    cudaEventElapsedTime(&msElapsed, start, stop);
+
+    float avg_msElapsed = msElapsed / iterations;
+
+    // calculate Gbs/Sec memory bandwidth (SOL)
+
+    double gb_per_sec = (2.0 * bytes * 1e-9)/(avg_msElapsed * 1e-3);
+
+    std::cout << "[Version 1: Plain Copy] Avg Time: " << avg_msElapsed 
+              << " ms | Effective Bandwidth: " << gb_per_sec << " GB/s\n";
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    
     cudaMemcpy(h_out.data(), d_out, bytes, cudaMemcpyDeviceToHost);
 
     verifyCopy(h_in, h_out, N);
