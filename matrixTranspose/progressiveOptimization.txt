@@ -7,4 +7,6 @@ This exists to measure Speed of Light (SOL) , because transposing a matrix invol
 only cost is pure memory traffic, So to measure the codes efficiency, we must first establish the
 bare metal memory bandwidth to compare against actual Transpose.
 
+o/p : Avg Time: 0.195052 ms | Effective Bandwidth: 688.114 GB/s
+
 -> Version 1 involved coalesced memory (N^2) reads and coalesced memory (N^2) writes
