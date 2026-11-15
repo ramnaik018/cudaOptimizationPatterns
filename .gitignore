@@ -1,0 +1,8 @@
+# 1. Ignore everything everywhere
+#*
+
+# 2. Allow Git to traverse into nested folders
+#!*/
+
+# 3. Un-ignore all files that have a dot (extension)
+#!*.*
