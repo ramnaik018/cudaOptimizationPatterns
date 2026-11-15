@@ -1,0 +1,10 @@
+In this document, I will write each stage of optimization of kernels,
+GPU used : A30 , 
+
+version 1: Plain matrix copy
+
+This exists to measure Speed of Light (SOL) , because transposing a matrix involved 0 FLOPS,
+only cost is pure memory traffic, So to measure the codes efficiency, we must first establish the
+bare metal memory bandwidth to compare against actual Transpose.
+
+-> Version 1 involved coalesced memory (N^2) reads and coalesced memory (N^2) writes
