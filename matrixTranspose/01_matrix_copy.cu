@@ -30,7 +30,8 @@ void verifyCopy(std::vector<float>& h_in, std::vector<float>& h_out,int n){
 }
 
 int main(){
-    const int N = 4096;
+    // const int N = 4096;
+    const int N = 8192;
     // size of matrix
     const size_t bytes = N * N * sizeof(float);
 
