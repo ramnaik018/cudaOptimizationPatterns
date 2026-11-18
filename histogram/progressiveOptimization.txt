@@ -1,0 +1,60 @@
+Underlying GPU details:
+
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.126.20             Driver Version: 580.126.20     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A30                     On  |   00000000:01:00.0 Off |                    0 |
+| N/A   27C    P0             27W /  165W |       0MiB /  24576MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+
+Version 01 : Naive Histogram contruction:
+
+In Here we have a input array which contains the characters representing the pixels of a an image,
+the range of pixel characters is from 0 to 255 i.e. 256 values , but the total size of array can be in millions covering all the pixels in an image
+for our use case we will take 64million (i.e. 64*(2^20)) 64*10^6
+
+Since each char falls in between 0 to 255 , we will create a freqency map (i.e. Histogram , where x - axis represents the pixel values and y - axis represents their frequencies in whole input array)
+
+This Histogram can be used in various usecases in Cameras , Photo Editing , Car image recognitions where devices can make an calculative edit to the whole photo at once adjusting their
+properties like Brightness , Contrast etc 
+
+Soo coming back to cuda algorithm , we use memory coalescing to access elements in the array , i.e. whole thread block's warps access the adjacent elements
+i.e. thread 0 access 0th element , thread 1 accesses 1st element, and to make use of whole GPU's SM's, we let whole grid access a streach in the input array and then loop over
+the input array in a grid stride fashion, each stride equals GridDim*blockDim, 
+
+according to the underlying hardware SMs, we can choose GridDim to streach our each iterations memory footprint in each clock cycle
+
+Since consumer GPUs has few 10's to 100's SMs, we choose 256 blocks per grid and 256 threads per block, which will process 256*256 , which is 64k elements at once
+i.e. 64K * 1 bytes = 64KBs, so if whole array is of length 64Million Bytes = 64 MB , each time GPUs process 64KB of data 
+so this needs 64MB / 64KB = 10^3 , which is equal to 1024 iterations, 
+
+However sicne each thread utilises a Atomic , 
+
+i) for a balenced data, we can have 64MB / grid size = 64 * 10^6  / 256*256 = 64 * 10^6 / (10^6/6) = 64 * 6 = 4096 atomics serialised
+ii) if the data is skewed , we cna have whole 64*10^6 elements as serialised data.
+
+Due to this reason of catastrophic downgrade in performance due to serialisation, there exists an next optimised way using shared memory
+
+output:
+
+root@jl-571370:~/cudaOptimizationPatterns/histogram# ./01_histogram_naive_contention
+
+Verification PASSED!
+Average time taken by each kernel (i.e. histogram creation is) : 58.4243 ms
+[naive Histogram bandwidth ] is : 1.14866GB per Sec
+
+
