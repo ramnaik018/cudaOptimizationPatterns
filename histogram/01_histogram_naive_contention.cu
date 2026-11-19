@@ -44,8 +44,9 @@ int main(){
 
     // now lets populate the input vector , 90% skewed , and 10% filled with balenced values from 0 ... 255
 
-    for(int i =0;i<N;i++){
+   for(int i =0;i<N;i++){
         h_in[i] = (i%10 == 0)?(i%BIN):0; // 0 gets implicitly casted by c++ , because 0 is a constexpr -> compile time constant
+       //h_in[i] = 0; // random data insteda of uniform data 
     }
 
     // well host side data is populated, now its time to populate device side data
