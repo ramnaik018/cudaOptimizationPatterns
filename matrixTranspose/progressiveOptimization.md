@@ -1,30 +1,94 @@
-CUDA Kernel Optimization: Matrix TransposeIn this document, I will write each stage of optimization of kernels.GPU Used: NVIDIA A30Underlying GPU Details+-----------------------------------------------------------------------------------------+
-| NVIDIA-SMI 580.126.20             Driver Version: 580.126.20     CUDA Version: 13.0     |
-+-----------------------------------------+------------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
-|                                         |                        |               MIG M. |
-|=========================================+========================+======================|
-|   0  NVIDIA A30                     On  |   00000000:01:00.0 Off |                    0 |
-| N/A   27C    P0             27W /  165W |       0MiB /  24576MiB |      0%      Default |
-|                                         |                        |             Disabled |
-+-----------------------------------------+------------------------+----------------------+
+# CUDA Matrix Transpose — Optimization Journey
 
-+-----------------------------------------------------------------------------------------+
-| Processes:                                                                              |
-|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
-|        ID   ID                                                               Usage      |
-|=========================================================================================|
-|  No running processes found                                                             |
-+-----------------------------------------------------------------------------------------+
-Version 1: Plain Matrix CopyThis exists to measure Speed of Light (SOL), because transposing a matrix involves $0\text{ FLOPS}$—the only cost is pure memory traffic. So to measure the code's efficiency, we must first establish the bare-metal memory bandwidth to compare against the actual Transpose.Exact Path of Memory Transfer (SOL Qualification)Source (Read): Matrix d_in which is already sitting in the GPU's off-chip VRAM (HBM or GDDR).Through the chip: The data travels across the GPU's high-speed memory bus, passes through L2 cache and L1 cache, and lands briefly onto registers inside Streaming Multiprocessors (SM).Destination (Write): Matrix d_out which is a separate memory buffer also allocated in the GPU's VRAM.Note: Version 1 involves coalesced memory ($N^2$) reads and coalesced memory ($N^2$) writes.OutputAvg Time: 0.195052 ms | Effective Bandwidth: 688.114 GB/s , N -> 4096
-[Version 1: Plain Copy] Avg Time: 0.768297 ms | Effective Bandwidth: 698.78 GB/s : N-> 8192
-Version 2: Naive TransposeIn this version, we just do the transpose anyway. Here, the reads are coalesced, but by definition, the layout of the output matrix with respect to the input will be vertical, so we have no other choice but to store data in the output matrix vertically.As we are aware, vertical data read/write will cause un-coalesced memory access, where for a warp ($32\text{ threads}$):Coalesced access (Read): $32\text{ threads}$. Since the cache line is accessing nearby memory locations, the received data is $4\text{ sectors}$ ($4 \times 32$), which is $128\text{ Bytes}$. Since all $128\text{ Bytes}$ are getting used, bandwidth efficiency is $100\%$.Uncoalesced access (Write): $32\text{ threads}$. Since each element write needs to access different cache lines, $32 \times 128\text{ Bytes}$ is being retrieved, out of which only $128\text{ Bytes}$ are getting written. So bandwidth utilized theoretically is:
-$$\frac{128}{128 \times 32} = \frac{100}{32} = 3.125\% \text{ (approx } 3.25\%)$$Hardware Reality: New GPU architectures optimize this efficiency from $\frac{100}{32}$ to $\frac{100}{8}$ (i.e., $12.5\%$). Instead of each write utilizing a whole cache line of $128\text{ Bytes}$, each write utilizes a single sector of $32\text{ Bytes}$.Due to the un-coalesced write, the memory bandwidth has reduced from $688\text{ GB/s}$ to $86\text{ GB/s}$, which is exactly $12.5\%$ of $688\text{ GB/s}$.Outputroot@jl-571370:~/cudaOptimizationPatterns/matrixTranspose# ./02_transpose_naive 
-Transpose successful..!
-[Version 2: naive transpose] Avg Time: 1.54526 ms | Effective Bandwidth: 86.8579 GB/s -> N size : 4096
-[Version 2: naive transpose] Avg Time: 5.20554 ms | Effective Bandwidth: 103.134 GB/s -> N size : 8192
-Version 3: Transpose Shared ConflictCoalesced Write and Read on Global memory cannot be possible without a third helper space: Shared Memory. Here, shared memory will act as a staging buffer which stores a small portion of the whole matrix ($\text{Tile} \times \text{Tile}$) and assigns the values to HBM memory output.The Catch: Reads of shared memory happen vertically. Since we have $32$ as the size of columns, we will have a 32-way bank conflict in every shared memory of all the blocks.The Result: Since the penalty with these bank conflicts is less than Global memory uncoalesced writes, the bandwidth improves by a lot as you can see in the output below.Flow Mental PictureInitially, all blocks activate at the same time (depending on if SMs have resources or not). For those blocks that start assigning threads, since each block has $256\text{ threads}$, and each block is supposed to cater to $\text{TILE} \times \text{TILE}$ (i.e., $32 \times 32 = 1024\text{ matrix cells}$), each thread will cater to $4\text{ cells}$ ($256 \times 4 = 1024\text{ cells}$).The first chunk of $256\text{ cells}$ gets copied to shared memory at the same time by all $256\text{ threads}$ in all blocks. Here, each tile has the top $256\text{ cells}$ (top $8\text{ rows}$), so we then use a for loop to iterate over the vertical direction to fill the rest of the $3\text{ chunks}$ in each TILE of each block.Then comes the interesting part: since we need to fill the HBM output matrix in a coalesced manner, we take out chunks from shared memory from left to right, and then fill up the output's corresponding tile in a top-to-bottom fashion.Due to this improvement, we can see that bandwidth has increased.Output[Version 3: shared memory transpose] Avg Time: 0.401612 ms | Effective Bandwidth: 334.198 GB/s -> N size 4096
-[Version 3: shared memory transpose] Avg Time: 1.42568 ms | Effective Bandwidth: 376.571 GB/s -> N size 8192
-Version 4: Padded Shared Memory Transpose (No Conflict)This version is more or less similar to Version 3. The only change is we increase the number of columns from $32$ to $33$ in shared memory, while still storing data on $32 \times 32$ itself. This extra column is added to make bank conflicts zero-way.How it works: We know every shared memory has $32\text{ banks}$. In Version 3, each warp was accessing a single bank because data was stored in [32][32]...[32]. When we add an extra column ([32][33]), if it needs to access the same column again, the padding of size $1$ comes in between and shifts the address by $1$, preventing the GPU from colliding with the other threads' accessed banks.The Result: When a warp reads down the column (tile[threadIdx.x][threadIdx.y+j]), all $32\text{ threads}$ hit $32\text{ distinct banks}$ simultaneously in a single clock cycle, bringing the performance right up near the SOL baseline of bandwidth.Note: Here, bandwidth is actually $>$ baseline SOL because of L2 Cache and Burst Efficiency.Output[Version 4: padded shared memory transpose] Avg Time: 0.175879 ms | Effective Bandwidth: 763.127 GB/s -> size N 4096
-[Version 4: padded shared memory transpose] Avg Time: 0.704383 ms | Effective Bandwidth: 762.186 GB/s -> size N 8192
+GPU used: **NVIDIA A30** (24 GB HBM2, driver 580.126.20, CUDA 13.0)
+
+This document tracks each optimization stage of a CUDA matrix-transpose kernel, from a naive baseline up to a bank-conflict-free shared-memory implementation, measured against the hardware's Speed of Light (SOL) memory bandwidth.
+
+---
+
+## Version 1 — Plain Matrix Copy (measuring Speed of Light)
+
+Transposing a matrix involves **zero FLOPs** — it's a pure memory-traffic operation. So before optimizing the transpose itself, we need a baseline: the bare-metal memory bandwidth this GPU can sustain on a simple copy, with no transpose-induced access pattern at all.
+
+**Memory path for this version:**
+- **Source (read):** matrix `d_in`, already resident in the GPU's off-chip VRAM (HBM/GDDR)
+- **Through the chip:** data travels across the GPU's high-speed memory bus, through L2 cache, then L1 cache, landing briefly in registers inside the Streaming Multiprocessors (SMs)
+- **Destination (write):** matrix `d_out`, a separate buffer also allocated in VRAM
+
+Both the read and the write here are fully **coalesced** — N² reads, N² writes, no awkward access pattern.
+
+```
+Avg Time: 0.195052 ms | Effective Bandwidth: 688.114 GB/s  (N = 4096)
+Avg Time: 0.768297 ms | Effective Bandwidth: 698.780 GB/s  (N = 8192)
+```
+
+This ~690–700 GB/s is our **SOL baseline** — everything below is measured against it.
+
+---
+
+## Version 2 — Naive Transpose
+
+Here we actually transpose. The **reads** are coalesced (same as Version 1), but by definition, the output matrix's layout relative to the input forces the **writes** to be vertical — i.e., uncoalesced.
+
+**Why uncoalesced writes are so expensive**, for a warp of 32 threads:
+
+- **Coalesced access (read):** 32 threads access nearby memory locations → the transaction pulls in 4 sectors × 32 bytes = 128 bytes total, and all 128 bytes are used. **Bandwidth efficiency: 100%.**
+- **Uncoalesced access (write):** each of the 32 threads needs a different cache line → 32 × 128 bytes gets fetched, of which only 128 bytes are actually written. Bandwidth utilized = 128 / (128 × 32) = **3.25%** in theory.
+
+In practice, modern GPU architectures optimize this up from 100/32 (3.25%) to **100/8 (12.5%)** — instead of pulling a whole 128-byte cache line per write, each write only pulls a single 32-byte sector.
+
+This is exactly what we observe: bandwidth drops from the ~688 GB/s SOL baseline to **~86 GB/s**, which is almost exactly 12.5% of baseline.
+
+```
+[Version 2: naive transpose] Avg Time: 1.54526 ms | Effective Bandwidth: 86.8579 GB/s  (N = 4096)
+[Version 2: naive transpose] Avg Time: 5.20554 ms | Effective Bandwidth: 103.134 GB/s (N = 8192)
+```
+
+---
+
+## Version 3 — Shared Memory Transpose (bank conflicts present)
+
+To get coalesced reads **and** coalesced writes on global memory, we need a staging buffer in between — **shared memory**. Each block loads a `TILE × TILE` chunk of the input into shared memory, then writes it back out to global memory in a transposed but still-coalesced fashion.
+
+**Mental model of the flow:**
+
+1. All blocks that have SM resources available launch at the same time.
+2. Each block has 256 threads but needs to cover a `32 × 32` (1024-cell) tile, so each thread handles 4 cells (256 × 4 = 1024).
+3. The first 256 cells (the tile's top 8 rows) get copied into shared memory simultaneously by all 256 threads.
+4. A loop then iterates vertically to fill the remaining 3 chunks of the tile.
+5. To write the output in a coalesced manner, chunks are read back out of shared memory left-to-right, and written into the output's corresponding tile top-to-bottom.
+
+**The catch:** reading shared memory *vertically* here causes a **32-way bank conflict** in every tile, across every block — shared memory has exactly 32 banks, and a vertical read pattern on a `32`-wide tile means every thread in the warp lands on the same bank.
+
+Even so, the penalty from a shared-memory bank conflict is much smaller than the penalty from an uncoalesced global-memory write, so bandwidth improves substantially over Version 2:
+
+```
+[Version 3: shared memory transpose] Avg Time: 0.401612 ms | Effective Bandwidth: 334.198 GB/s (N = 4096)
+[Version 3: shared memory transpose] Avg Time: 1.42568 ms  | Effective Bandwidth: 376.571 GB/s (N = 8192)
+```
+
+---
+
+## Version 4 — Padded Shared Memory Transpose (no conflict)
+
+Nearly identical to Version 3, with one change: the shared-memory tile is declared with **33 columns instead of 32** (`tile[32][33]`), while only the `32×32` region is actually used for data. The extra column exists purely to eliminate bank conflicts.
+
+**Why padding works:** shared memory has 32 banks, and bank index is (roughly) `address % 32`. In Version 3, the tile is laid out as `[32][32]`, so a fixed column index always maps to the *same* bank across every row — hence the 32-way conflict on a vertical read. By widening each row to 33 elements, every step down a column shifts the starting bank by one (since the row stride is no longer a multiple of 32). This means a warp reading down a column (`tile[threadIdx.x][threadIdx.y + j]`) now hits **32 distinct banks simultaneously**, in a single clock cycle — no conflict at all.
+
+This pushes performance right up near — and in this case slightly *above* — the SOL baseline, which is explained by L2 cache effects and burst efficiency on this hardware:
+
+```
+[Version 4: padded shared memory transpose] Avg Time: 0.175879 ms | Effective Bandwidth: 763.127 GB/s (N = 4096)
+[Version 4: padded shared memory transpose] Avg Time: 0.704383 ms | Effective Bandwidth: 762.186 GB/s (N = 8192)
+```
+
+---
+
+## Summary
+
+| Version | Technique | Bandwidth (N=4096) | % of SOL |
+|---|---|---|---|
+| 1 | Plain copy (SOL baseline) | 688.1 GB/s | 100% |
+| 2 | Naive transpose (uncoalesced writes) | 86.9 GB/s | ~12.6% |
+| 3 | Shared memory (32-way bank conflict) | 334.2 GB/s | ~48.6% |
+| 4 | Padded shared memory (no bank conflict) | 763.1 GB/s | ~110.9% |
